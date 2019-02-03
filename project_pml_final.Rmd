@@ -1,0 +1,174 @@
+---
+---
+title: "FinalProject_JH_012019"
+author: "Christos Antoniadis"
+date: "01/2019"
+output: html_document
+keep_md: yes
+pdf_document: default
+---
+Using various devices and apps nowadays it's easy to collect a large amount of data about your personal daily activity. One thing that people regularly try is quantify how much of a particular activity they do, but they rarely quantify how well they do it.
+
+In this project, our goal is to take advantage of info coming from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways.
+They were asked to perform barbell lifts correctly and incorrectly in 5 different ways.
+
+The goal of our project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set.
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE, fig.width=10, fig.height=5)
+options(width=120)
+rm(list=ls(all=TRUE))
+# Load the Required for the Process Packages
+library(readr)
+library(ggplot2)
+library(Rmisc)
+library(caret)
+library(gbm)
+library(rpart)
+library(e1071)
+library(RColorBrewer)
+library(e1071)
+library(xgboost)
+library(Matrix)
+library(methods)
+library(caret)
+library(dplyr)
+library(Metrics)
+```
+# Set a certain seed
+```{r}
+set.seed(15041984)
+```
+# Load the related Data
+Data are extracted directly via the links provided
+```{r}
+url4train <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+url4test <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+trainInput <- read.csv(url(url4train), na.strings = c("NA","#DIV/0!",""))
+testInput <- read.csv(url(url4test), na.strings = c("NA","#DIV/0!",""))
+```
+# Train dataset
+Check for NAs and exclude them despite the fact that the XGBoost is designed to handle missing values internally. 
+```{r}
+columnNACounts <- colSums(is.na(trainInput))             
+to_exclude <- columnNACounts >= 0.5*dim(trainInput)[1]   
+training <- trainInput[!to_exclude]         
+```
+# Test dataset
+Apply the NAs approach into the test set as well
+```{r}
+columnNACounts <- colSums(is.na(testInput))
+to_exclude <- columnNACounts >= 0.5*dim(testInput)[1] 
+testing <- testInput[!to_exclude]
+
+```
+# Actions regarding zeros
+```{r}
+myDataNZV <- nearZeroVar(training, saveMetrics=TRUE)
+nzvIndex<-which((myDataNZV[,4]) == "TRUE")
+training <- training[,-nzvIndex]
+testing <- testing[,-nzvIndex]
+rm(myDataNZV)
+rm(nzvIndex)
+```
+# Data Transformations & Formation
+```{r}
+training$classe <- factor(training$classe)
+training$user_name <- factor(training$user_name)
+training$cvtd_timestamp <- NULL
+testing$classe <- -1
+testing$user_name <- factor(testing$user_name)
+testing$cvtd_timestamp <- NULL
+
+feature.names <- names(training)
+feature.names <- feature.names[-which(feature.names %in% c('X', 'classe'))]
+feature.names <- feature.names[-which(feature.names %in% c('user_name', 'raw_timestamp_part_1', 'raw_timestamp_part_2', 'new_window', 'num_window'))]
+feature.formula <- formula(paste('classe ~ ', paste(feature.names, collapse = ' + '), sep = ''))
+
+dtrain_cv <- training[, c(feature.names, 'classe')]
+inTrain<- createDataPartition(y = dtrain_cv$classe, p = 0.7, list = FALSE)
+dtrain.matrix <- sparse.model.matrix(feature.formula, data = dtrain_cv[inTrain, ])
+# The XGBoost algorithm requires the data to be passed as a matrix.
+dtrain <- xgb.DMatrix(dtrain.matrix, label = dtrain_cv[inTrain, 'classe'])
+dvalid <- xgb.DMatrix(sparse.model.matrix(feature.formula, data = dtrain_cv[-inTrain, ]),
+                      label = dtrain_cv[-inTrain, 'classe'])
+
+dtest_cv <- testing[, c(feature.names, 'classe')]
+dtest <- sparse.model.matrix(feature.formula, data = dtest_cv)
+```
+# Cross Validation - Parameters' Specification
+The right choice of parameters is an important issue for a succesful model. Let me present you in brief the sence of my choices regarding the xgboost process and the cross validation on which I end up after various trials:
+
+Number of iterations for boosting equals to 250 is a rational choise for an agile and reliable model:
+1)  n_rounds.cv      =  250
+
+Our booster choice focuses on tree based models:
+2)  booster          =  gbtree
+
+We set XGBoost to do multiclass classification using the softmax objective. It is also required to set num_class (number of classes)
+3)  objective        =  multi:softmax
+
+The chosen evaluation metric for data validation is the Multiclass classification error rate. It is calculated as #(wrong cases)/#(all cases).
+4)  eval_metric      =  merror
+
+We choose the Maximum depth of a tree equal to six. Larger values of it would make our model more complex and more likely to overfit. 0 would indicate no limit: 
+5)  max_depth        =  6
+
+Step size shrinkage used to prevents overfitting. After each boosting step, we directly get the weights of new features, and eta shrinks the feature weights to make the boosting process more conservative.
+6)  eta              =  0.1
+
+The following parameter expresses the subsample ratio of columns when constructing each tree. Subsampling occurs once for every tree constructed.
+7)  colsample_bytree =  1
+
+Subsample expresses the ratio of the training instances.Value 1 is a default value. Subsampling occurs once in every boosting iteration.
+8)  subsample        =  1
+
+Cross-validation approach is splitting the train dataset into "nfolds" and iteratively keeps one of the folds for test purposes. The number of folds we assumed equals to 5:
+9)  nfold            =  5
+
+Just specify the frequency of results printing:
+10) print_every_n    =  25
+
+```{r}
+numberOfClasses <- length(unique(training$classe))
+n_rounds.cv <- 250
+xgb.params <- list(booster = "gbtree", objective = "multi:softmax",
+               num_class = numberOfClasses+1, eval_metric = 'merror',
+               max_depth = 6, eta = 0.1,
+               colsample_bytree = 1, subsample = 1)
+```
+It is important to exam our model. Cross  validation  is  an  ideal  method  to  measure  the  model's  predictive  power,  as  well  as
+the degree of overfitting. 
+```{r}
+bst.cv <- xgb.cv(xgb.params, dtrain, n_rounds.cv, nfold = 5, metrics = {'merror'},
+                 print_every_n = 25, prediction = TRUE)
+n_rounds.train <- which.min(bst.cv$evaluation_log$train_merror_mean)
+n_rounds.train
+```
+# Train the model
+Built the xgboost model
+```{r}
+bst_model <- xgb.train(params = xgb.params, data = dtrain, nrounds = n_rounds.train)
+```
+# Train Set Accuracy
+```{r}
+predicted <- factor(predict(bst_model, dtrain), labels = levels(training$classe))
+confusionMatrix(predicted, dtrain_cv[inTrain, 'classe'])
+```
+# Validation dataset accuracy
+```{r}
+predicted <- factor(predict(bst_model, dvalid), labels = levels(training$classe))
+confusionMatrix(predicted, dtrain_cv[-inTrain, 'classe'])
+```
+# Feature importance
+XGB importance plot is a quick method to visualize importance of independent variables. It is used here to limit independent variables of our model.
+```{r}
+feature.importance <- xgb.importance(dimnames(dtrain.matrix)[[2]], model = bst_model)
+head(feature.importance)
+xgb.plot.importance(feature.importance)
+```
+# Predict test cases
+```{r}
+testCases <- factor(predict(bst_model, dtest), labels = levels(training$classe))
+testCases <- as.character(testCases)
+testCases
+```
